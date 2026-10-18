@@ -124,6 +124,27 @@ testing.test("break/continue in match arms keep captured locals", lam{ in
     testing.expectEqual(callAll(gs), [0, 3, 6, 9], nil)
 })
 
+testing.test("range loop gives each iteration its own variable", lam{ in
+    let fs = []
+    for (i in 0 .. 3) { fs.push(lam{ in i }) }
+    testing.expectEqual(callAll(fs), [0, 1, 2], nil)
+
+    let pairs = []
+    for (i in 0 .. 2) {
+        for (j in 0 .. 2) { pairs.push(lam{ in [i, j] }) }
+    }
+    testing.expectEqual(callAll(pairs), [[0, 0], [0, 1], [1, 0], [1, 1]], nil)
+})
+
+testing.test("assigning the range variable doesn't change iteration", lam{ in
+    let seen = []
+    for (i in 0 .. 5) {
+        seen.push(i)
+        i = i + 10
+    }
+    testing.expectEqual(seen, [0, 1, 2, 3, 4], nil)
+})
+
 testing.test("closure state survives break", lam{ in
     let fs = []
     for (i in 0 .. 3) {

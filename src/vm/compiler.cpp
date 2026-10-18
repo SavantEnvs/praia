@@ -353,11 +353,19 @@ void Compiler::compileWhileStmt(const WhileStmt* stmt) {
 }
 
 void Compiler::compileForStmt(const ForStmt* stmt) {
+    // Compiled as:
+    // let __i__ = <start>
+    // let __end__ = <end>
+    // while (__i__ < __end__) {
+    //     let varName = __i__     // fresh per iteration, so closures
+    //     <body>                  // capture that iteration's value and
+    //     __i__ = __i__ + 1       // assigning varName can't skip ahead
+    // }
     beginScope();
 
     // Evaluate bounds
     compileExpr(stmt->start.get());
-    addLocal(stmt->varName);  // loop var
+    addLocal("__i__");  // hidden counter
 
     compileExpr(stmt->end.get());
     addLocal("__end__");  // hidden end bound
@@ -365,8 +373,8 @@ void Compiler::compileForStmt(const ForStmt* stmt) {
     int loopStart = currentChunk().size();
     current->loops.push_back({loopStart, loopStart, {}, {}, current->scopeDepth, current->tryDepth, current->finallyStack.size()});
 
-    // Condition: i < end
-    int iSlot = resolveLocal(current, stmt->varName);
+    // Condition: __i__ < __end__
+    int iSlot = resolveLocal(current, "__i__");
     int endSlot = resolveLocal(current, "__end__");
     emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
     emitU16(static_cast<uint16_t>(iSlot), stmt->line, stmt->column);
@@ -375,15 +383,24 @@ void Compiler::compileForStmt(const ForStmt* stmt) {
     emit(OpCode::OP_LESS, stmt->line, stmt->column);
     int exitJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, stmt->line, stmt->column);
 
+    // Loop var = __i__, in a scope that ends (closing it if captured)
+    // before the increment
+    beginScope();
+    emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
+    emitU16(static_cast<uint16_t>(iSlot), stmt->line, stmt->column);
+    addLocal(stmt->varName);
+
     // Body
     compileStmt(stmt->body.get());
+
+    endScope(stmt->line); // pops loop var
 
     // Continue target: increment section
     current->loops.back().continueTarget = currentChunk().size();
     // Patch any continue jumps to here
     for (int j : current->loops.back().continueJumps) patchJump(j);
 
-    // Increment: i = i + 1
+    // Increment: __i__ = __i__ + 1
     emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
     emitU16(static_cast<uint16_t>(iSlot), stmt->line, stmt->column);
     emitConstant(Value(static_cast<int64_t>(1)), stmt->line, stmt->column);
