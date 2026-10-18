@@ -26,6 +26,10 @@ GcHeap& GcHeap::current() {
     return instance;
 }
 
+// The real constructor reads PRAIA_GC_STRESS; stress mode means nothing
+// without the mark phase, so the stub ignores it.
+GcHeap::GcHeap() = default;
+
 void GcHeap::track(const std::shared_ptr<PraiaArray>& p) {
     entries_.push_back({std::weak_ptr<void>(p), static_cast<void*>(p.get()), GcType::Array});
     allocsSinceGc_++;
@@ -73,17 +77,13 @@ void GcHeap::collect() {
 }
 
 // Mark functions kept as no-ops to satisfy the class declaration.
+// The rest of the collector's private helpers (findExternallyHeld,
+// markNode, NodeTable, ...) are only called from the real collect(),
+// so they need no definitions here.
 void GcHeap::mark() {}
 void GcHeap::sweep() {}
 void GcHeap::markValue(const Value&) {}
 void GcHeap::markEnvironment(Environment*) {}
-void GcHeap::markArray(PraiaArray*) {}
-void GcHeap::markTagged(PraiaTagged*) {}
-void GcHeap::markMap(PraiaMap*) {}
-void GcHeap::markInstance(PraiaInstance*) {}
-void GcHeap::markClass(PraiaClass*) {}
-void GcHeap::markGenerator(PraiaGenerator*) {}
-void GcHeap::markCallable(Callable*) {}
 
 // Definition for the thread-local declared in interpreter.h. NativeFunction::call
 // (inline in the header) references it via TLS, so any TU that uses a native —
