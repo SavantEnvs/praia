@@ -362,6 +362,128 @@ testing.test("finally runs on return from catch", lam{ in
     testing.expectEqual(log, ["catch", "finally"], nil)
 })
 
+testing.test("finally runs on break", lam{ in
+    let log = []
+    for (i in 0..5) {
+        try {
+            push(log, i)
+            if (i == 2) { break }
+        } catch (e) {
+        } finally {
+            push(log, "f" + str(i))
+        }
+    }
+    testing.expectEqual(log, [0, "f0", 1, "f1", 2, "f2"], nil)
+})
+
+testing.test("finally runs on continue", lam{ in
+    let log = []
+    for (i in 0..3) {
+        try {
+            if (i == 1) { continue }
+            push(log, i)
+        } catch (e) {
+        } finally {
+            push(log, "f" + str(i))
+        }
+    }
+    testing.expectEqual(log, [0, "f0", "f1", 2, "f2"], nil)
+})
+
+testing.test("finally runs on break from catch", lam{ in
+    let log = []
+    for (i in 0..3) {
+        try {
+            throw "x"
+        } catch (e) {
+            push(log, "c" + str(i))
+            if (i == 1) { break }
+        } finally {
+            push(log, "f" + str(i))
+        }
+    }
+    testing.expectEqual(log, ["c0", "f0", "c1", "f1"], nil)
+})
+
+testing.test("nested finally blocks run innermost first", lam{ in
+    let log = []
+    while (true) {
+        try {
+            try { break } catch (e) {} finally { push(log, "inner") }
+        } catch (e) {
+        } finally {
+            push(log, "outer")
+        }
+    }
+    testing.expectEqual(log, ["inner", "outer"], nil)
+
+    let log2 = []
+    func test() {
+        try {
+            try { return 1 } catch (e) {} finally { push(log2, "inner") }
+        } catch (e) {
+        } finally {
+            push(log2, "outer")
+        }
+    }
+    testing.expectEqual(test(), 1, nil)
+    testing.expectEqual(log2, ["inner", "outer"], nil)
+})
+
+testing.test("finally outside the loop isn't run by break", lam{ in
+    let log = []
+    try {
+        for (i in 0..3) {
+            if (i == 1) { break }
+            push(log, i)
+        }
+        push(log, "after")
+    } catch (e) {
+    } finally {
+        push(log, "f")
+    }
+    testing.expectEqual(log, [0, "after", "f"], nil)
+})
+
+testing.test("return inside finally overrides return from try", lam{ in
+    func test() {
+        try { return "a" } catch (e) {} finally { return "b" }
+    }
+    testing.expectEqual(test(), "b", nil)
+})
+
+testing.test("break inside finally during break", lam{ in
+    let log = []
+    for (i in 0..3) {
+        try {
+            try { break } catch (e) {} finally {
+                push(log, "in")
+                break
+            }
+        } catch (e) {
+        } finally {
+            push(log, "out")
+        }
+    }
+    testing.expectEqual(log, ["in", "out"], nil)
+})
+
+testing.test("locals declared in finally on break", lam{ in
+    let log = []
+    for (i in 0..3) {
+        let a = i * 10
+        try {
+            let b = a + 1
+            if (i == 1) { break }
+        } catch (e) {
+        } finally {
+            let z = a + 5
+            push(log, z)
+        }
+    }
+    testing.expectEqual(log, [5, 15], nil)
+})
+
 testing.test("error messages include column info", lam{ in
     // Runtime error — division by zero at a known column
     let r1 = sys.exec("./praia -c \"let x = 10 / 0\"")

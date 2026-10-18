@@ -41,6 +41,15 @@ private:
         std::vector<int> continueJumps;
         int scopeDepthAtLoop;
         int tryDepthAtLoop;    // try nesting depth when the loop started
+        size_t finallyDepthAtLoop; // finallyStack size when the loop started
+    };
+
+    // A try/finally whose body is being compiled. tryDepthBefore is the
+    // handler depth outside it, so an early exit knows how many handlers
+    // to end before running this finally.
+    struct FinallyEntry {
+        const Stmt* body = nullptr;
+        int tryDepthBefore = 0;
     };
 
     struct CompilerState {
@@ -52,7 +61,7 @@ private:
         int tryDepth = 0;      // number of active try handlers in this function
         bool isGenerator = false;
         std::vector<LoopContext> loops;
-        std::vector<const Stmt*> finallyStack; // enclosing finally bodies for return/break/continue
+        std::vector<FinallyEntry> finallyStack; // enclosing finally bodies for return/break/continue
     };
 
     CompilerState* current = nullptr;
@@ -72,6 +81,7 @@ private:
     void compileBreakStmt(const BreakStmt* stmt);
     void compileContinueStmt(const ContinueStmt* stmt);
     void emitLoopExitPops(int scopeDepthAtLoop, int line, int column);
+    void emitFinallyUnwind(size_t finallyFloor, int tryFloor, int line, int column);
     void compileClassStmt(const ClassStmt* stmt);
     void compileEnumStmt(const EnumStmt* stmt);
     void compileThrowStmt(const ThrowStmt* stmt);
