@@ -253,6 +253,8 @@ A Value that prints as `<external:typeName>`, passes through assignments / funct
 
 ## GC roots: stashing Values across native calls
 
+> **Current engines don't require pinning for safety.** The collector compares each object's `shared_ptr` count with the references it can see from other heap objects. Anything held from outside the heap — a C++ local, a static cache, a `std::function` capture, a `PraiaExternal`'s data — is treated as a root and never swept. Pinning still works and is still the right call for plugins that must also load into older engines, which swept such values; the rules below describe those engines. One cost remains on current engines: a cycle that passes through a Value held in C++ can't be collected until the C++ side lets go.
+
 If your plugin stashes a Praia `Value` in C++ static / global storage that outlives the native function call — a callback table, a cache, a singleton — you **must** pin it as a GC root. Otherwise the next garbage collection treats the value as unreachable and the sweep hollows out the underlying object's internal references. The `shared_ptr` you held stays valid, but the object is empty: a stashed `Callable` finds an empty closure environment, a cached `PraiaMap` finds its entries cleared.
 
 `praia::pinValue` registers the value with the current thread's `GcHeap` so the mark phase visits it on every collection. Reference-counted by multiplicity: pin N times means N unpins to release. The matching uses last-in-first-out, so nested RAII pin/unpin pairs work without bookkeeping.

@@ -1078,8 +1078,9 @@ VM::Result VM::execute(int baseFrameCount_) {
         // yield point exactly.
         if (postedPending_.load(std::memory_order_acquire)) drainPosted();
         if (--gcCounter_ <= 0) {
-            gcCounter_ = 1024;
-            GcHeap::current().collectIfNeeded();
+            GcHeap& heap = GcHeap::current();
+            gcCounter_ = heap.stressMode() ? 1 : 1024;
+            heap.collectIfNeeded();
             // Check for pending SIGINT — makes Ctrl+C catchable by try/catch
             if (g_pendingSignals.load(std::memory_order_relaxed) & (1u << SIGINT)) {
                 g_pendingSignals.fetch_and(~(1u << SIGINT));

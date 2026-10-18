@@ -9,6 +9,14 @@ class Environment; // forward declaration
 
 enum class GcType { Array, Tagged, Map, Set, Instance, Class, Generator, Environment, External };
 
+// Node kinds in the object graph the collector walks. Superset of
+// GcType: Callables (functions, lambdas, bound methods) aren't tracked
+// themselves but sit on paths between tracked objects, so the
+// external-reference scan has to see through them.
+enum class GcNodeKind : uint8_t {
+    Array, Tagged, Map, Set, Instance, Class, Generator, Environment, External, Callable
+};
+
 class GcHeap {
 public:
     static GcHeap& current();
@@ -56,6 +64,13 @@ public:
     int trackedCount() const { return static_cast<int>(entries_.size()); }
     int collected() const { return lastCollected_; }
 
+    // Stress mode (PRAIA_GC_STRESS=N): collect after every N
+    // allocations instead of the auto-tuned threshold, and the VM
+    // checks for that at every instruction instead of every 1024.
+    // Slow — meant for running the test suite to flush out objects
+    // the collector can't see.
+    bool stressMode() const { return stress_; }
+
 private:
     struct GcEntry {
         std::weak_ptr<void> weak;
@@ -63,8 +78,40 @@ private:
         GcType type;
     };
 
+    // Per-collection bookkeeping keyed by object pointer: the external
+    // reference count from findExternallyHeld() and the mark bit.
+    // Open addressing over one flat array, kept between collections so
+    // a large heap doesn't pay a node allocation per object per cycle.
+    class NodeTable {
+    public:
+        struct Slot {
+            void* key = nullptr;
+            long refs = 0;
+            GcNodeKind kind = GcNodeKind::External;
+            bool marked = false;
+        };
+        // Empties the table, sized for about `expected` entries.
+        void reset(size_t expected);
+        // Returns the slot for key, inserting {kind, refs} if absent.
+        // The pointer is only valid until the next insert.
+        std::pair<Slot*, bool> insert(void* key, GcNodeKind kind, long refs);
+        Slot* find(void* key);
+        template <typename F> void forEach(F&& f) {
+            for (auto& s : slots_) if (s.key) f(s);
+        }
+    private:
+        std::vector<Slot> slots_;
+        size_t size_ = 0;
+        size_t mask_ = 0;
+        size_t indexFor(void* key) const;
+        void grow();
+    };
+
     std::vector<GcEntry> entries_;
-    std::unordered_set<void*> marked_;
+    NodeTable nodes_;
+    // Strong references to every tracked object, taken for the duration
+    // of a collection (see findExternallyHeld).
+    std::vector<std::shared_ptr<void>> held_;
     // Plugin-pinned values — see pinValue/unpinValue. Marked alongside
     // the interpreter's own roots on every collection.
     std::vector<Value> pinned_;
@@ -74,19 +121,35 @@ private:
     int threshold_ = 500;
     bool collecting_ = false;
     bool disabled_ = false;
+    bool stress_ = false;
+    int stressInterval_ = 1;
+
+    struct MarkItem {
+        void* obj;
+        GcNodeKind kind;
+    };
+    // Explicit worklist so marking deep structures (long linked lists)
+    // doesn't recurse on the C++ stack.
+    std::vector<MarkItem> markStack_;
+
+    GcHeap();
 
     void mark();
     void sweep();
 
-    // Type-specific mark helpers
-    void markArray(PraiaArray* arr);
-    void markTagged(PraiaTagged* tag);
-    void markMap(PraiaMap* map);
-    void markSet(PraiaSet* set);
-    void markInstance(PraiaInstance* inst);
-    void markClass(PraiaClass* cls);
-    void markGenerator(PraiaGenerator* gen);
-    void markCallable(Callable* c);
+    // Tracked objects whose shared_ptr count exceeds the references the
+    // collector can see from other heap objects — something outside the
+    // heap (a C++ local in a native, a native closure capture, another
+    // thread) still holds them, so they're roots.
+    std::vector<MarkItem> findExternallyHeld();
+
+    // Calls f(obj, kind, useCount, owning) for each outgoing edge of a
+    // node. Member so it can reach Environment's private fields.
+    template <typename F>
+    static void forEachChild(void* obj, GcNodeKind kind, F& f);
+
+    void markNode(void* obj, GcNodeKind kind);
+    void drainMarkStack();
 };
 
 // Factory: creates a shared_ptr and registers it with the thread-local GcHeap.

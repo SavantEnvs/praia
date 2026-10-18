@@ -232,6 +232,13 @@ uninstall:
 test: $(TARGET) test-input
 	./$(TARGET) test
 
+# Whole suite on both engines with the GC collecting after every
+# allocation (PRAIA_GC_STRESS=1). Catches values the collector can't
+# see — anything held only by C++ code gets swept immediately here.
+test-gc-stress: $(TARGET)
+	PRAIA_GC_STRESS=1 ./$(TARGET) test
+	PRAIA_GC_STRESS=1 ./$(TARGET) --tree test
+
 # Integration test for sys.input — needs piped stdin, so runs outside `praia test`.
 test-input: $(TARGET)
 	@out=$$(printf "Ada\ny\n" | ./$(TARGET) examples/input_demo.praia) && \
@@ -345,4 +352,4 @@ fuzz-run:
 	    -artifact_prefix=fuzz/crashes/$(TARGET)/ \
 	    -print_final_stats=1
 
-.PHONY: all clean install uninstall test test-input plugin
+.PHONY: all clean install uninstall test test-input test-gc-stress plugin
