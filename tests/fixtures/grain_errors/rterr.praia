@@ -1,0 +1,3 @@
+// Runtime error on line 3 while being imported — see test_imports.praia
+let a = 1
+let x = nil + a

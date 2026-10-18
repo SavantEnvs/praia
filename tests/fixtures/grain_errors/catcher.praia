@@ -1,0 +1,4 @@
+// Catches a failing import itself and still exports
+try { use "./thrower" } catch (e) { }
+let v = 7
+export { v }

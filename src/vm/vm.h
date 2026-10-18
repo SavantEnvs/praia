@@ -289,6 +289,9 @@ private:
     // the same dependency share a single execution.
     std::unordered_map<std::string, Value> grainCache;
     std::set<std::string> importedInCurrentFile;
+    // Grains executing right now, outermost first (cycle check). Like
+    // grainCache, only the root VM's copy is used.
+    std::vector<std::string> grainLoadStack_;
     std::vector<std::vector<StmtPtr>> grainAsts;
 
     // Persistent per-grain VMs. Each loaded grain runs in its own VM so
@@ -308,6 +311,9 @@ private:
     VM* parentVm_ = nullptr;
     VM& rootVm() { return parentVm_ ? parentVm_->rootVm() : *this; }
 
+    // Throws RuntimeError for a failure to load (not found, parse error,
+    // circular import), or GrainError when the grain's own code fails;
+    // OP_IMPORT raises either at the `use`.
     Value loadGrain(const std::string& path, int line);
     std::string resolveGrainPath(const std::string& path, int line);
 
@@ -336,6 +342,18 @@ private:
     // so errors propagate instead of being printed prematurely
     std::string lastError_;
     bool suppressErrors_ = false;
+    // When the last uncaught error was a Praia `throw`, the thrown value
+    // (lastError_ holds its string form). Lets a grain's error reach the
+    // importing VM unchanged.
+    Value lastThrown_;
+    bool lastErrorWasThrow_ = false;
+    // Where the last uncaught error happened, and (only when errors are
+    // suppressed, i.e. someone else will report it) the stack trace at
+    // that point. A failed grain hands these to its importer.
+    int lastErrorLine_ = 0;
+    int lastErrorColumn_ = 0;
+    std::string lastErrorTrace_;
+    void recordUncaught(int line, int column);
 public:
     const std::string& lastError() const { return lastError_; }
     void gcMarkRoots(GcHeap& heap);

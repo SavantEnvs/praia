@@ -251,6 +251,11 @@ Value Interpreter::loadGrain(const std::string& importPath, int line) {
     auto cached = grainCache.find(resolved);
     if (cached != grainCache.end()) return cached->second;
 
+    // Only cached once it finishes, so a grain that's still loading
+    // further up the chain would otherwise be re-entered forever.
+    if (std::find(grainLoadStack_.begin(), grainLoadStack_.end(), resolved) != grainLoadStack_.end())
+        throw RuntimeError(circularImportMessage(grainLoadStack_, resolved), line);
+
     // Read source
     std::ifstream f(resolved);
     if (!f.is_open())
@@ -284,6 +289,7 @@ Value Interpreter::loadGrain(const std::string& importPath, int line) {
     currentFile = resolved;
     importedInCurrentFile.clear();
     currentAstOwner_ = ast;
+    grainLoadStack_.push_back(resolved);
 
     Value exports;
     try {
@@ -298,12 +304,14 @@ Value Interpreter::loadGrain(const std::string& importPath, int line) {
         currentFile = prevFile;
         importedInCurrentFile = prevImports;
         currentAstOwner_ = prevAstOwner;
+        grainLoadStack_.pop_back();
         throw;
     }
     env = prevEnv;
     currentFile = prevFile;
     importedInCurrentFile = prevImports;
     currentAstOwner_ = prevAstOwner;
+    grainLoadStack_.pop_back();
 
     // Keep the AST alive and cache the result
     grainAsts.push_back(std::move(ast));
