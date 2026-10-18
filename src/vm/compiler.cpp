@@ -333,7 +333,7 @@ void Compiler::compileIfStmt(const IfStmt* stmt) {
 void Compiler::compileWhileStmt(const WhileStmt* stmt) {
     int loopStart = currentChunk().size();
 
-    current->loops.push_back({loopStart, loopStart, {}, {}, current->scopeDepth, current->tryDepth});
+    current->loops.push_back({loopStart, loopStart, {}, {}, current->scopeDepth, current->tryDepth, current->finallyStack.size()});
 
     compileExpr(stmt->condition.get());
     int exitJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, stmt->line, stmt->column);
@@ -353,20 +353,28 @@ void Compiler::compileWhileStmt(const WhileStmt* stmt) {
 }
 
 void Compiler::compileForStmt(const ForStmt* stmt) {
+    // Compiled as:
+    // let __i__ = <start>
+    // let __end__ = <end>
+    // while (__i__ < __end__) {
+    //     let varName = __i__     // fresh per iteration, so closures
+    //     <body>                  // capture that iteration's value and
+    //     __i__ = __i__ + 1       // assigning varName can't skip ahead
+    // }
     beginScope();
 
     // Evaluate bounds
     compileExpr(stmt->start.get());
-    addLocal(stmt->varName);  // loop var
+    addLocal("__i__");  // hidden counter
 
     compileExpr(stmt->end.get());
     addLocal("__end__");  // hidden end bound
 
     int loopStart = currentChunk().size();
-    current->loops.push_back({loopStart, loopStart, {}, {}, current->scopeDepth, current->tryDepth});
+    current->loops.push_back({loopStart, loopStart, {}, {}, current->scopeDepth, current->tryDepth, current->finallyStack.size()});
 
-    // Condition: i < end
-    int iSlot = resolveLocal(current, stmt->varName);
+    // Condition: __i__ < __end__
+    int iSlot = resolveLocal(current, "__i__");
     int endSlot = resolveLocal(current, "__end__");
     emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
     emitU16(static_cast<uint16_t>(iSlot), stmt->line, stmt->column);
@@ -375,15 +383,24 @@ void Compiler::compileForStmt(const ForStmt* stmt) {
     emit(OpCode::OP_LESS, stmt->line, stmt->column);
     int exitJump = emitJump(OpCode::OP_POP_JUMP_IF_FALSE, stmt->line, stmt->column);
 
+    // Loop var = __i__, in a scope that ends (closing it if captured)
+    // before the increment
+    beginScope();
+    emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
+    emitU16(static_cast<uint16_t>(iSlot), stmt->line, stmt->column);
+    addLocal(stmt->varName);
+
     // Body
     compileStmt(stmt->body.get());
+
+    endScope(stmt->line); // pops loop var
 
     // Continue target: increment section
     current->loops.back().continueTarget = currentChunk().size();
     // Patch any continue jumps to here
     for (int j : current->loops.back().continueJumps) patchJump(j);
 
-    // Increment: i = i + 1
+    // Increment: __i__ = __i__ + 1
     emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
     emitU16(static_cast<uint16_t>(iSlot), stmt->line, stmt->column);
     emitConstant(Value(static_cast<int64_t>(1)), stmt->line, stmt->column);
@@ -436,7 +453,7 @@ void Compiler::compileForInStmt(const ForInStmt* stmt) {
     int resultSlot = resolveLocal(current, "__result__");
 
     int loopStart = currentChunk().size();
-    current->loops.push_back({loopStart, loopStart, {}, {}, current->scopeDepth, current->tryDepth});
+    current->loops.push_back({loopStart, loopStart, {}, {}, current->scopeDepth, current->tryDepth, current->finallyStack.size()});
 
     // Call __iterNext(__iter__, __idx__) — returns {value, done}
     emit(OpCode::OP_GET_GLOBAL, stmt->line, stmt->column);
@@ -605,15 +622,68 @@ void Compiler::compileReturnStmt(const ReturnStmt* stmt) {
     } else {
         emit(OpCode::OP_NIL, stmt->line, stmt->column);
     }
-    // Close any active try handlers before returning from this function
-    for (int i = 0; i < current->tryDepth; i++) {
-        emit(OpCode::OP_TRY_END, stmt->line, stmt->column);
+    if (current->finallyStack.empty()) {
+        // Leave any try handlers in this function and return
+        emitFinallyUnwind(0, 0, stmt->line, stmt->column);
+        emit(OpCode::OP_RETURN, stmt->line, stmt->column);
+        return;
     }
-    // Run any enclosing finally blocks (outermost last)
-    for (auto* finallyBody : current->finallyStack) {
-        compileStmt(finallyBody);
-    }
+    // Finally bodies run while the return value sits on the stack. Track
+    // it as a local so their own locals get the right slots, and so a
+    // break/continue inside one (which cancels the return) pops it.
+    beginScope();
+    addLocal("__ret__");
+    int retSlot = static_cast<int>(current->locals.size()) - 1;
+    emitFinallyUnwind(0, 0, stmt->line, stmt->column);
+    emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
+    emitU16(static_cast<uint16_t>(retSlot), stmt->line, stmt->column);
     emit(OpCode::OP_RETURN, stmt->line, stmt->column);
+    // OP_RETURN discards the frame's stack, so drop the local from the
+    // compiler's view without emitting a pop.
+    current->locals.pop_back();
+    current->scopeDepth--;
+}
+
+// Pops the loop-body locals that break/continue jump out of, without
+// removing them from the compiler's scope (the code after the jump is
+// still inside that scope). Like endScope, a local captured by a closure
+// gets OP_CLOSE_UPVALUE so the closure keeps its value instead of
+// pointing at a stack slot the next iteration reuses. A closure that
+// appears after the break/continue hasn't been compiled yet, so its
+// local isn't marked captured — but it can't have run yet in this
+// iteration either, so there's no open upvalue to close.
+void Compiler::emitLoopExitPops(int scopeDepthAtLoop, int line, int column) {
+    for (int i = static_cast<int>(current->locals.size()) - 1; i >= 0; i--) {
+        if (current->locals[i].depth <= scopeDepthAtLoop) break;
+        emit(current->locals[i].isCaptured ? OpCode::OP_CLOSE_UPVALUE : OpCode::OP_POP,
+             line, column);
+    }
+}
+
+// Emits what has to happen before control jumps out of the trys entered
+// since finallyFloor / tryFloor: innermost first, end that try's
+// handlers, then run its finally body. Handlers of plain try/catch (and
+// try expressions) in between are ended in order too, so a throw from a
+// finally body is caught by a try that still encloses it.
+//
+// Each finally body is compiled the way it would be after its own try —
+// outside that try's handlers and without its own finallyStack entry —
+// so a return/break/continue inside it doesn't inline it again.
+void Compiler::emitFinallyUnwind(size_t finallyFloor, int tryFloor, int line, int column) {
+    int depth = current->tryDepth;
+    auto saved = current->finallyStack;
+    for (size_t i = saved.size(); i-- > finallyFloor;) {
+        for (; depth > saved[i].tryDepthBefore; depth--)
+            emit(OpCode::OP_TRY_END, line, column);
+        current->finallyStack.resize(i);
+        int savedTryDepth = current->tryDepth;
+        current->tryDepth = depth;
+        compileStmt(saved[i].body);
+        current->tryDepth = savedTryDepth;
+    }
+    current->finallyStack = std::move(saved);
+    for (; depth > tryFloor; depth--)
+        emit(OpCode::OP_TRY_END, line, column);
 }
 
 void Compiler::compileBreakStmt(const BreakStmt* stmt) {
@@ -621,17 +691,11 @@ void Compiler::compileBreakStmt(const BreakStmt* stmt) {
         error("'break' outside of loop", stmt->line);
         return;
     }
-    auto& loop = current->loops.back();
-    // Close try handlers that are active inside this loop
-    for (int i = loop.tryDepthAtLoop; i < current->tryDepth; i++) {
-        emit(OpCode::OP_TRY_END, stmt->line, stmt->column);
-    }
-    // Pop locals in the loop scope
-    for (int i = static_cast<int>(current->locals.size()) - 1; i >= 0; i--) {
-        if (current->locals[i].depth <= loop.scopeDepthAtLoop) break;
-        emit(OpCode::OP_POP, stmt->line, stmt->column);
-    }
-    loop.breakJumps.push_back(emitJump(OpCode::OP_JUMP, stmt->line, stmt->column));
+    // Copied out: compiling finally bodies can push loops and reallocate.
+    LoopContext loop = current->loops.back();
+    emitFinallyUnwind(loop.finallyDepthAtLoop, loop.tryDepthAtLoop, stmt->line, stmt->column);
+    emitLoopExitPops(loop.scopeDepthAtLoop, stmt->line, stmt->column);
+    current->loops.back().breakJumps.push_back(emitJump(OpCode::OP_JUMP, stmt->line, stmt->column));
 }
 
 void Compiler::compileContinueStmt(const ContinueStmt* stmt) {
@@ -639,18 +703,12 @@ void Compiler::compileContinueStmt(const ContinueStmt* stmt) {
         error("'continue' outside of loop", stmt->line);
         return;
     }
-    auto& loop = current->loops.back();
-    // Close try handlers that are active inside this loop body
-    for (int i = loop.tryDepthAtLoop; i < current->tryDepth; i++) {
-        emit(OpCode::OP_TRY_END, stmt->line, stmt->column);
-    }
-    // Pop locals inside the loop body
-    for (int i = static_cast<int>(current->locals.size()) - 1; i >= 0; i--) {
-        if (current->locals[i].depth <= loop.scopeDepthAtLoop) break;
-        emit(OpCode::OP_POP, stmt->line, stmt->column);
-    }
+    // Copied out: compiling finally bodies can push loops and reallocate.
+    LoopContext loop = current->loops.back();
+    emitFinallyUnwind(loop.finallyDepthAtLoop, loop.tryDepthAtLoop, stmt->line, stmt->column);
+    emitLoopExitPops(loop.scopeDepthAtLoop, stmt->line, stmt->column);
     // Jump forward to the increment section (will be patched later)
-    loop.continueJumps.push_back(emitJump(OpCode::OP_JUMP, stmt->line, stmt->column));
+    current->loops.back().continueJumps.push_back(emitJump(OpCode::OP_JUMP, stmt->line, stmt->column));
 }
 
 void Compiler::compileClassStmt(const ClassStmt* stmt) {
@@ -854,7 +912,7 @@ void Compiler::compileThrowStmt(const ThrowStmt* stmt) {
 void Compiler::compileTryCatchStmt(const TryCatchStmt* stmt) {
     if (stmt->finallyBody) {
         // Track this finally block so return/break/continue can emit it
-        current->finallyStack.push_back(stmt->finallyBody.get());
+        current->finallyStack.push_back({stmt->finallyBody.get(), current->tryDepth});
 
         // Outer try to guarantee finally runs even if catch throws
         int outerTry = emitJump(OpCode::OP_TRY_BEGIN, stmt->line, stmt->column);

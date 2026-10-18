@@ -110,6 +110,9 @@ jobs:
       - name: Test (tree-walker)
         run: ./praia --tree test
 
+      - name: Test (GC stress, both engines)
+        run: make test-gc-stress
+
   # Coverage-guided fuzz regression. For each parser target, build the
   # fuzz binary and run for ~60 s against the committed seeds. Any crash
   # fails the job and uploads the offending input + sanitizer log so the

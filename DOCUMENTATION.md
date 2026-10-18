@@ -6154,9 +6154,10 @@ a = nil         // refcount stays 1 due to cycle — GC breaks it
 
 The collector runs automatically in the background. It tracks container objects (arrays, maps, instances, classes, generators, environments) and periodically:
 
-1. **Marks** all objects reachable from roots (stack, globals, upvalues)
-2. **Sweeps** any tracked object that is alive but not reachable — these are in cycles
-3. **Breaks** the cycle by clearing the object's internal references, allowing normal refcount cleanup
+1. **Finds external references**: for every tracked object it subtracts the references held by other heap objects from its refcount. Anything left over is held from outside the heap (native code, another thread) and counts as a root
+2. **Marks** all objects reachable from roots (stack, globals, upvalues, and those externally held objects)
+3. **Sweeps** any tracked object that is alive but not reachable — these are in cycles
+4. **Breaks** the cycle by clearing the object's internal references, allowing normal refcount cleanup
 
 ### What you need to know
 
@@ -6164,6 +6165,7 @@ The collector runs automatically in the background. It tracks container objects 
 - It only targets **cycles**. Non-cyclic objects are freed immediately by refcounting
 - Each thread has its own collector (async tasks are isolated)
 - The collector auto-tunes its frequency based on how much garbage it finds
+- `PRAIA_GC_STRESS=1` makes it collect after every allocation (`PRAIA_GC_STRESS=N`: every N allocations). Very slow; meant for testing the runtime and native plugins (`make test-gc-stress` runs the suite this way)
 
 ### Common cycle patterns (all handled)
 

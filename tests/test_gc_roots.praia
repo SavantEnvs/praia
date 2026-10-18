@@ -1,0 +1,89 @@
+use "testing"
+
+// Values held only by native code (a native's locals, a native closure's
+// captures, SharedMap/Queue storage, another thread) must survive a
+// collection. Each test churns enough allocations to force at least one
+// GC while such a value is live. Run with PRAIA_GC_STRESS=1 to collect
+// at every opportunity instead.
+
+func churn() {
+    for (i in 0..12000) { let t = [i, [i]] }
+}
+
+testing.test("map result survives GC during callbacks", lam{ in
+    let nums = []
+    for (i in 0..5000) { nums.push(i) }
+    let r = map(nums, lam{ n in {id: n, tags: [n]} })
+    testing.expectEqual(len(r), 5000, nil)
+    testing.expectEqual(r[4999].tags, [4999], nil)
+})
+
+testing.test("filter result survives GC during callbacks", lam{ in
+    let recs = []
+    for (i in 0..5000) { recs.push({id: i}) }
+    let ev = filter(recs, lam{ r in r.id % 2 == 0 })
+    testing.expectEqual(len(ev), 2500, nil)
+})
+
+testing.test("callback arguments survive GC inside the callback", lam{ in
+    let src = [[1], [2], [3]]
+    let r = map(src, lam{ x in
+        churn()
+        return x
+    })
+    testing.expectEqual(r, [[1], [2], [3]], nil)
+})
+
+testing.test("sort with an allocating comparator", lam{ in
+    let r = sort([[3], [1], [2]], lam{ a, b in
+        churn()
+        return a[0] < b[0]
+    })
+    testing.expectEqual(r, [[1], [2], [3]], nil)
+})
+
+testing.test("bound method keeps its receiver", lam{ in
+    let g = [[1], [2], [3]].sorted
+    churn()
+    testing.expectEqual(g(), [[1], [2], [3]], nil)
+})
+
+testing.test("SharedMap entries survive GC", lam{ in
+    let sm = SharedMap()
+    sm.set("a", [1, 2, 3])
+    churn()
+    testing.expectEqual(sm.get("a"), [1, 2, 3], nil)
+})
+
+testing.test("Queue contents survive GC", lam{ in
+    let q = Queue()
+    q.send({x: [4, 5]})
+    churn()
+    testing.expectEqual(q.recv(), {x: [4, 5]}, nil)
+})
+
+testing.test("generator locals survive GC between yields", lam{ in
+    func gen() {
+        let local = [1, 2, 3]
+        yield 0
+        churn()
+        yield local
+    }
+    let it = gen()
+    it.next()
+    testing.expectEqual(it.next().value, [1, 2, 3], nil)
+})
+
+testing.test("closure returned from async task keeps its captures", lam{ in
+    // Its upvalues live in the task's ownership bag, not the VM's.
+    func mk(arr) { return lam{ in arr } }
+    let c = await async mk([1, [2, 3]])
+    c().push(c)   // cycle through the task-owned upvalue
+    churn()
+    let arr = c()
+    testing.expectEqual(arr[0], 1, nil)
+    testing.expectEqual(arr[1], [2, 3], nil)
+    testing.expectEqual(len(arr), 3, nil)
+})
+
+testing.done()

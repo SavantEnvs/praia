@@ -685,12 +685,14 @@ static std::string mapStringParam(const Value& maybeMap, const char* key,
 // once we have a request; the v1 surface targets the questions
 // users actually ask of a cert (who, when, fingerprint, hosts).
 
-static Value x509NameToMap(X509_NAME* name) {
+static Value x509NameToMap(const X509_NAME* name) {
     auto out = gcNew<PraiaMap>();
     int n = X509_NAME_entry_count(name);
     for (int i = 0; i < n; ++i) {
-        X509_NAME_ENTRY* entry = X509_NAME_get_entry(name, i);
-        ASN1_OBJECT* obj = X509_NAME_ENTRY_get_object(entry);
+        // const throughout: OpenSSL 4 returns const pointers here, and
+        // OpenSSL 3 already accepts them, so this builds against both.
+        const X509_NAME_ENTRY* entry = X509_NAME_get_entry(name, i);
+        const ASN1_OBJECT* obj = X509_NAME_ENTRY_get_object(entry);
         int nid = OBJ_obj2nid(obj);
         std::string keyName;
         // Short name (CN/O/OU/...) when OpenSSL knows it; OID text
@@ -703,7 +705,7 @@ static Value x509NameToMap(X509_NAME* name) {
             OBJ_obj2txt(buf, sizeof(buf), obj, 1);
             keyName = buf;
         }
-        ASN1_STRING* str = X509_NAME_ENTRY_get_data(entry);
+        const ASN1_STRING* str = X509_NAME_ENTRY_get_data(entry);
         unsigned char* utf8 = nullptr;
         int len = ASN1_STRING_to_UTF8(&utf8, str);
         std::string val;
@@ -723,7 +725,7 @@ static Value x509NameToMap(X509_NAME* name) {
     return Value(out);
 }
 
-static std::string x509NameToOneline(X509_NAME* name) {
+static std::string x509NameToOneline(const X509_NAME* name) {
     // X509_NAME_oneline with NULL buf returns a newly-allocated
     // string sized exactly to the content — no risk of truncation
     // for unusually-long subject DNs.

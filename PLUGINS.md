@@ -253,7 +253,9 @@ A Value that prints as `<external:typeName>`, passes through assignments / funct
 
 ## GC roots: stashing Values across native calls
 
-If your plugin stashes a Praia `Value` in C++ static / global storage that outlives the native function call — a callback table, a cache, a singleton — you **must** pin it as a GC root. Otherwise the next garbage collection treats the value as unreachable and the sweep hollows out the underlying object's internal references. The `shared_ptr` you held stays valid, but the object is empty: a stashed `Callable` finds an empty closure environment, a cached `PraiaMap` finds its entries cleared.
+> **Current engines don't require pinning for safety.** The collector compares each object's `shared_ptr` count with the references it can see from other heap objects. Anything held from outside the heap — a C++ local, a static cache, a `std::function` capture, a `PraiaExternal`'s data — is treated as a root and never swept. Pinning still works and is still the right call for plugins that must also load into older engines, which swept such values; the rules below describe those engines. One cost remains on current engines: a cycle that passes through a Value held in C++ can't be collected until the C++ side lets go.
+
+**On older engines**, if your plugin stashes a Praia `Value` in C++ static / global storage that outlives the native function call — a callback table, a cache, a singleton — you **must** pin it as a GC root. Otherwise the next garbage collection treats the value as unreachable and the sweep hollows out the underlying object's internal references. The `shared_ptr` you held stays valid, but the object is empty: a stashed `Callable` finds an empty closure environment, a cached `PraiaMap` finds its entries cleared.
 
 `praia::pinValue` registers the value with the current thread's `GcHeap` so the mark phase visits it on every collection. Reference-counted by multiplicity: pin N times means N unpins to release. The matching uses last-in-first-out, so nested RAII pin/unpin pairs work without bookkeeping.
 
@@ -294,14 +296,16 @@ extern "C" void praia_register(PraiaMap* module) {
 
 ### When you need this
 
-| Storage shape | Pin needed? |
+On current engines, no row needs a pin for safety: every shape below is a value held outside the heap, which the collector treats as a root. The table describes older engines, for plugins that must support them.
+
+| Storage shape | Pin needed on older engines? |
 |---|---|
 | Local `Value` / `Value` argument in a non-reentrant native call | No. The C++ stack frame keeps the `shared_ptr` alive, and nothing else runs between native entry and return to trigger a sweep. |
 | Local `Value` / argument across a `praia::call` callback, async yield, or any other reentrant path | **Yes.** Re-entering the interpreter can run a GC sweep on this thread. The C++ stack pins the `shared_ptr` (so the object's address stays valid) but the sweep can still clear the object's *internal* references — see [Scope guard (RAII)](#scope-guard-raii) below. |
 | `Value` stashed in C++ static / global between calls | **Yes.** |
 | `Value` inside a `PraiaExternal`'s opaque data (e.g. an SQLite connection wrapper) | **Yes, if the stored Value is GC-tracked.** The external itself is GC-tracked, but its `data` field is just `void*` — the GC doesn't know to walk inside. Pin any Praia Values you store there. |
 
-The rule in one sentence: **a local `Value` is safe without a pin only while no Praia code can run on this thread**. The moment you call back into the interpreter — directly via `praia::call`, indirectly via anything that allocates Praia objects, or implicitly across an async yield — a sweep can fire and the value's internals are exposed.
+The rule in one sentence, for older engines: **a local `Value` is safe without a pin only while no Praia code can run on this thread**. The moment you call back into the interpreter — directly via `praia::call`, indirectly via anything that allocates Praia objects, or implicitly across an async yield — a sweep can fire and the value's internals are exposed.
 
 ### When you don't
 
@@ -316,8 +320,9 @@ module->entries["recurseSafely"] = Value(makeNative("mod.recurseSafely", 2,
     [](const std::vector<Value>& args) -> Value {
         praia::PinnedValue keepAlive(args[0]);   // pin until scope exit
         // The Praia callback might internally trigger GC pressure.
-        // Without `keepAlive`, args[0]'s captured env could be cleared
-        // mid-call — even though args[0] is still on the C++ stack.
+        // On older engines, without `keepAlive`, args[0]'s captured env
+        // could be cleared mid-call — even though args[0] is still on
+        // the C++ stack. Current engines keep it regardless.
         praia::call(args[1].asCallable(), {});
         return keepAlive.get();
     }));
