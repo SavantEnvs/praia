@@ -324,6 +324,7 @@ private:
     std::string currentFile;                              // path of currently executing file
     std::unordered_map<std::string, Value> grainCache;    // resolved path -> cached exports
     std::set<std::string> importedInCurrentFile;          // tracks per-file duplicate imports
+    std::vector<std::string> grainLoadStack_;             // grains executing right now (cycle check)
 
     // AST storage — shared_ptr so callables can co-own the AST they reference
     using AstProgram = std::shared_ptr<std::vector<StmtPtr>>;

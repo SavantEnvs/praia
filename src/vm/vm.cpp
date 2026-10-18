@@ -10,6 +10,7 @@
 #include "../string_distance.h"
 #include "../unicode.h"
 #include <algorithm>
+#include <optional>
 #include <cstdio>          // std::fprintf in drainPosted's error logging
 #include <atomic>
 #include <chrono>
@@ -753,6 +754,18 @@ void VM::unwindFramesAndRunDefers(int targetFrameCount) {
 void VM::runDefers(int frameIdx) {
     auto defers = std::move(deferStack[frameIdx]);
     deferStack[frameIdx].clear();
+    if (defers.empty()) return;
+    // A failing defer reports itself below; it must not replace the
+    // record of an uncaught error being unwound right now, which a
+    // failed grain hands to its importer.
+    struct SavedError {
+        std::string message;
+        Value thrown;
+        bool wasThrow;
+        int line, column;
+        std::string trace;
+    } saved{lastError_, lastThrown_, lastErrorWasThrow_,
+            lastErrorLine_, lastErrorColumn_, lastErrorTrace_};
     // Save VM state, run defers on the same VM (re-entrant but safe because
     // result is popped before we get here), then let OP_RETURN restore.
     // Errors in one defer must not stop the rest from running, but we surface
@@ -790,15 +803,25 @@ void VM::runDefers(int frameIdx) {
         // Restore stack — deferred function's return might have changed stackTop
         stackTop = savedTop;
         frameCount = savedFrameCount;
-        if (errored && !suppressErrors_) {
+        // A grain VM suppresses its uncaught error (the importer raises
+        // it) but nobody else reports a failed defer, so it prints here.
+        if (errored && (!suppressErrors_ || parentVm_)) {
             std::cerr << "Error in deferred call: "
                       << (errMsg.empty() ? "(no message)" : errMsg) << std::endl;
         }
     }
+    lastError_ = std::move(saved.message);
+    lastThrown_ = std::move(saved.thrown);
+    lastErrorWasThrow_ = saved.wasThrow;
+    lastErrorLine_ = saved.line;
+    lastErrorColumn_ = saved.column;
+    lastErrorTrace_ = std::move(saved.trace);
 }
 
 void VM::runtimeError(const std::string& msg, int line, int column) {
     lastError_ = msg;
+    lastErrorWasThrow_ = false;
+    recordUncaught(line, column);
     // In re-entrant calls (depth > 1), suppress output — the error
     // will propagate to the outer scope which will print or catch it.
     if (!suppressErrors_ && executeDepth_ <= 1) {
@@ -846,21 +869,41 @@ std::string VM::formatStackTrace() const {
 std::string VM::resolveGrainPath(const std::string& path, int line) {
     try {
         return ::resolveGrainPath(path, currentFile);
+    } catch (const RuntimeError&) {
+        throw;
     } catch (const std::runtime_error& e) {
-        runtimeError(e.what(), line);
-        return "";
+        throw RuntimeError(e.what(), line);
     }
+}
+
+namespace {
+// An error a grain's top-level code didn't catch, carried out of
+// loadGrain so the importer's OP_IMPORT can raise it again: the same
+// thrown value (or runtime error message), plus where it happened inside
+// the grain for the report if nothing catches it.
+struct GrainError {
+    bool isThrow;
+    Value thrown;
+    std::string message;
+    int line;
+    int column;
+    std::string trace;
+};
+}
+
+void VM::recordUncaught(int line, int column) {
+    lastErrorLine_ = line;
+    lastErrorColumn_ = column;
+    lastErrorTrace_ = suppressErrors_ ? formatStackTrace() : std::string();
 }
 
 Value VM::loadGrain(const std::string& importPath, int line) {
     std::string resolved = resolveGrainPath(importPath, line);
-    if (resolved.empty()) return Value();
 
-    if (importedInCurrentFile.count(resolved)) {
-        runtimeError("Grain '" + importPath + "' is already imported in this file", line);
-        return Value();
-    }
+    if (importedInCurrentFile.count(resolved))
+        throw RuntimeError("Grain '" + importPath + "' is already imported in this file", line);
     importedInCurrentFile.insert(resolved);
+    FailedImportGuard importGuard{importedInCurrentFile, resolved};
 
     // Cache lookup goes through the root VM so two sibling grains
     // importing the same dependency share one execution. Without this,
@@ -869,11 +912,20 @@ Value VM::loadGrain(const std::string& importPath, int line) {
     // top-level `print` firing twice).
     auto& cache = rootVm().grainCache;
     auto cached = cache.find(resolved);
-    if (cached != cache.end()) return cached->second;
+    if (cached != cache.end()) {
+        importGuard.loaded = true;
+        return cached->second;
+    }
+
+    // Only cached once it finishes, so a grain that's still loading
+    // further up the chain would otherwise be re-entered forever.
+    auto& loading = rootVm().grainLoadStack_;
+    if (std::find(loading.begin(), loading.end(), resolved) != loading.end())
+        throw RuntimeError(circularImportMessage(loading, resolved), line);
 
     // Read source
     std::ifstream f(resolved);
-    if (!f.is_open()) { runtimeError("Cannot read grain: " + resolved, line); return Value(); }
+    if (!f.is_open()) throw RuntimeError("Cannot read grain: " + resolved, line);
     std::stringstream ss;
     ss << f.rdbuf();
     std::string source = ss.str();
@@ -881,16 +933,18 @@ Value VM::loadGrain(const std::string& importPath, int line) {
     // Lex + parse
     Lexer lexer(source);
     auto tokens = lexer.tokenize();
-    if (lexer.hasError()) { runtimeError("Syntax error in grain: " + importPath, line); return Value(); }
+    if (lexer.hasError()) throw RuntimeError("Syntax error in grain: " + importPath, line);
 
     Parser parser(tokens);
     auto program = parser.parse();
-    if (parser.hasError()) { runtimeError("Parse error in grain: " + importPath, line); return Value(); }
+    if (parser.hasError()) throw RuntimeError("Parse error in grain: " + importPath, line);
 
     // Compile
     Compiler compiler;
     auto script = compiler.compile(program);
-    if (!script) { runtimeError("Compile error in grain: " + importPath, line); return Value(); }
+    if (!script) throw RuntimeError("Compile error in grain: " + importPath, line);
+    // Stack traces show the grain's top level as this instead of <script>
+    script->name = "<grain " + importPath + ">";
 
     // Execute in a persistent per-grain VM with only builtins (not user
     // globals). The grain VM outlives this function — it's stashed in
@@ -910,6 +964,9 @@ Value VM::loadGrain(const std::string& importPath, int line) {
     }
     grainVm.builtinNames_ = builtinNames_;
     grainVm.currentFile = resolved;
+    // Errors the grain doesn't catch are raised again at the importer's
+    // `use` (or printed there if nothing catches them), not here.
+    grainVm.suppressErrors_ = true;
 
     // Tag every CompiledFunction reachable from the grain's script (the
     // top-level chunk and any nested function constants) so all of the
@@ -946,16 +1003,15 @@ Value VM::loadGrain(const std::string& importPath, int line) {
     grainVm.frames[0].missingArgsMask = 0;
     grainVm.frameCount = 1;
 
-    auto result = grainVm.execute();
-
-    // The grain should have ended with OP_EXPORT which pushes an exports map
-    // and returns. Check if there's a result.
-    Value exports;
-    if (result == Result::OK && grainVm.stackTop > 0) {
-        exports = grainVm.stack[grainVm.stackTop - 1];
-    } else {
-        exports = Value(gcNew<PraiaMap>()); // empty exports
+    loading.push_back(resolved);
+    Result result;
+    try {
+        result = grainVm.execute();
+    } catch (...) {
+        loading.pop_back();
+        throw;
     }
+    loading.pop_back();
 
     // Keep the grain's AST alive (chunks reference its string storage).
     grainAsts.push_back(std::move(program));
@@ -963,10 +1019,30 @@ Value VM::loadGrain(const std::string& importPath, int line) {
     // Hand the grain VM off to the parent. It (and all of its closures,
     // upvalues, and globals) lives as long as the parent does. Chunks
     // already point at &grainVm via homeVm; the unique_ptr below is just
-    // the lifetime anchor.
+    // the lifetime anchor. Kept even when the grain failed: code that
+    // ran before the error may have handed its closures out.
     grainVMs.push_back(std::move(grainVmPtr));
 
+    if (result != Result::OK) {
+        // Not cached, so a later import runs the grain again
+        throw GrainError{grainVm.lastErrorWasThrow_, grainVm.lastThrown_,
+                         grainVm.lastError_.empty() ? "Error in grain: " + importPath
+                                                    : grainVm.lastError_,
+                         grainVm.lastErrorLine_, grainVm.lastErrorColumn_,
+                         grainVm.lastErrorTrace_};
+    }
+
+    // The grain should have ended with OP_EXPORT which pushes an exports map
+    // and returns. Check if there's a result.
+    Value exports;
+    if (grainVm.stackTop > 0) {
+        exports = grainVm.stack[grainVm.stackTop - 1];
+    } else {
+        exports = Value(gcNew<PraiaMap>()); // empty exports
+    }
+
     rootVm().grainCache[resolved] = exports;
+    importGuard.loaded = true;
     return exports;
 }
 
@@ -2317,6 +2393,9 @@ VM::Result VM::execute(int baseFrameCount_) {
             // top-level (and function-scope) cleanup still runs on
             // abnormal termination.
             lastError_ = error.toString();
+            lastThrown_ = error;
+            lastErrorWasThrow_ = true;
+            recordUncaught(CURRENT_LINE(), CURRENT_COLUMN());
             if (!suppressErrors_ && executeDepth_ <= 1) {
                 std::cerr << formatLocation(CURRENT_LINE(), CURRENT_COLUMN())
                           << " Uncaught error: " << error.toString() << std::endl;
@@ -2407,10 +2486,40 @@ VM::Result VM::execute(int baseFrameCount_) {
             std::string path = READ_STRING();
             std::string alias = READ_STRING();
             (void)alias; // alias is handled by the compiler (defines the variable)
-            Value exports = loadGrain(path, CURRENT_LINE());
-            if (exports.isNil() && grainCache.find(path) == grainCache.end()) {
+            Value exports;
+            std::optional<GrainError> grainError;
+            std::string loadError;
+            try {
+                exports = loadGrain(path, CURRENT_LINE());
+            } catch (const GrainError& e) {
+                grainError = e;
+            } catch (const RuntimeError& e) {
+                loadError = e.what();
+            }
+            if (grainError) {
+                // The grain's error continues from this `use`: catchable
+                // here with the same value, and otherwise reported (or
+                // handed further up) with its location inside the grain.
+                auto& e = *grainError;
+                Value error = e.isThrow
+                    ? e.thrown
+                    : praia::wrapRuntimeErrorForVm(*this, RuntimeError(e.message, e.line, e.column));
+                if (tryHandleError(error)) break;
+                lastError_ = e.message;
+                lastThrown_ = e.thrown;
+                lastErrorWasThrow_ = e.isThrow;
+                lastErrorLine_ = e.line;
+                lastErrorColumn_ = e.column;
+                lastErrorTrace_ = suppressErrors_ ? e.trace + formatStackTrace() : std::string();
+                if (!suppressErrors_ && executeDepth_ <= 1) {
+                    std::cerr << formatLocation(e.line, e.column)
+                              << (e.isThrow ? " Uncaught error: " : " Runtime error: ")
+                              << e.message << std::endl;
+                    std::cerr << e.trace << formatStackTrace();
+                }
                 FAIL_AND_DRAIN_DEFERS();
             }
+            if (!loadError.empty()) RUNTIME_ERR(loadError);
             push(exports);
             break;
         }
@@ -2421,6 +2530,9 @@ VM::Result VM::execute(int baseFrameCount_) {
             // For a grain, this is the return value. Just return from execution.
             {
                 Value result = pop();
+                // `export` ends the grain's top level, so its defers run
+                // now, as OP_RETURN does for a function.
+                runDefers(frameCount - 1);
                 int returnBase = FRAME.baseSlot;
                 closeUpvalues(&stack[returnBase]);
                 frameCount--;
@@ -2945,6 +3057,8 @@ VM::Result VM::execute(int baseFrameCount_) {
     } catch (const RuntimeError& err) {
         // Fatal error (e.g. stack overflow from push())
         lastError_ = err.what();
+        lastErrorWasThrow_ = false;
+        recordUncaught(err.line, err.column);
         unwindFramesAndRunDefers(baseFrameCount_);
         return Result::RUNTIME_ERROR;
     }

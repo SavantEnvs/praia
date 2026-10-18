@@ -1,0 +1,3 @@
+// Top-level defer in a grain without an export — see test_imports.praia
+defer print("grain defer")
+print("grain body")

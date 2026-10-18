@@ -1,0 +1,3 @@
+// Imports b, which imports this file back — see test_imports.praia
+use "./b"
+export { }

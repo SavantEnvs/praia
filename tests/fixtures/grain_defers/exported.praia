@@ -1,0 +1,6 @@
+// Top-level defers in a grain that exports — see test_imports.praia
+let log = []
+defer log.push("defer 1")
+defer log.push("defer 2")
+log.push("body")
+export { log }

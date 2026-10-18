@@ -1024,6 +1024,8 @@ try {
 }
 ```
 
+`finally` also runs when `return`, `break`, or `continue` leaves the `try` or `catch` block early. Nested `finally` blocks run innermost first.
+
 ### throw
 
 Throw any value as an error. Praia ships a builtin **`Error` class hierarchy** — `Error` base plus typed subclasses (`TypeError`, `ValueError`, `IndexError`, `KeyError`, `NameError`, `AssertionError`, `IOError`, `NetworkError`, `HTTPError`, `TimeoutError`, `ParseError`) — that lets user code and the engine surface structured errors instead of bare strings. If not caught by a `try/catch`, the program terminates.
@@ -1136,6 +1138,8 @@ try { f() } catch (e) {}
 If a defer itself throws, it doesn't prevent other defers from running.
 
 `defer` also works at the **top level of a script** — useful for closing sqlite handles, flushing logs, or restoring terminal state before the program exits. Top-level defers fire when the script finishes (normal completion, uncaught throw, or `sys.exit()`). The REPL is the one exception: defers entered at the prompt are silently dropped because there is no defined script end.
+
+At the top level of a grain, defers fire when the grain finishes loading (after its last statement or `export`, or when it throws), before the importing code continues.
 
 ### ensure
 
@@ -1256,6 +1260,16 @@ let n = 10
 for (i in 1..n + 1) {
     print(i)            // 1 through 10
 }
+```
+
+Both bounds are evaluated once, before the first iteration. They must be numbers; non-integer bounds are truncated toward zero, so `0..2.5` gives `0, 1`.
+
+Each iteration gets its own `i`: a closure created in the loop keeps that iteration's value, and assigning to `i` inside the body doesn't change which values come next.
+
+```praia
+let fs = []
+for (i in 0..3) { fs.push(lam{ in i }) }
+print(map(fs, lam{ f in f() }))   // [0, 1, 2]
 ```
 
 ### for-in (arrays)
@@ -6007,6 +6021,8 @@ export { boxedCircleRatio }
 - **Grains run once** — if multiple files import the same grain, it is only executed the first time; subsequent imports get the cached exports
 - **Isolated scope** — grains cannot access the importer's variables; they only see globals and their own definitions
 - **Explicit exports** — only names listed in `export { ... }` are visible to the importer
+- **Errors reach the importer** — if a grain throws while it's being imported (or can't be found or parsed), the error is raised at the `use` statement, so `try`/`catch` around the `use` catches it with the original value. A grain that failed isn't cached
+- **No circular imports** — a grain that imports itself, directly or through other grains, is an error: `Circular import: a.praia -> b.praia -> a.praia`
 
 ```
 use "geometry"

@@ -4,7 +4,9 @@
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
+#include <set>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -185,3 +187,34 @@ inline std::string resolveGrainPath(const std::string& importPath,
 
     throw std::runtime_error("Grain not found: " + importPath);
 }
+
+// Error for importing a grain that is still being loaded further up the
+// import chain. `loading` is the stack of resolved paths currently
+// executing (outermost first); the cycle shown starts where `resolved`
+// was first entered, e.g. "Circular import: a.praia -> b.praia -> a.praia".
+inline std::string circularImportMessage(const std::vector<std::string>& loading,
+                                         const std::string& resolved) {
+    std::error_code ec;
+    fs::path cwd = fs::current_path(ec);
+    auto display = [&](const std::string& p) {
+        return ec ? p : fs::path(p).lexically_proximate(cwd).string();
+    };
+    std::string msg = "Circular import: ";
+    bool inCycle = false;
+    for (const auto& p : loading) {
+        if (p == resolved) inCycle = true;
+        if (inCycle) msg += display(p) + " -> ";
+    }
+    return msg + display(resolved);
+}
+
+// Removes a grain from importedInCurrentFile if loading it fails, so a
+// retry reaches the same error instead of "already imported". Holds a
+// reference to the member, which is swapped out while the grain runs
+// and restored before this fires.
+struct FailedImportGuard {
+    std::set<std::string>& imported;
+    const std::string& resolved;
+    bool loaded = false;
+    ~FailedImportGuard() { if (!loaded) imported.erase(resolved); }
+};

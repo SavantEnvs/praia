@@ -1,0 +1,3 @@
+// Imports itself — see test_imports.praia
+use "./self"
+export { }

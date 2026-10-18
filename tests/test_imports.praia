@@ -1,0 +1,129 @@
+use "testing"
+
+// Grain imports that form a cycle used to recurse until the process
+// crashed. Each case runs in a subprocess under both engines.
+
+func run(engineArgs, script) {
+    let args = ["./praia"]
+    for (a in engineArgs) { args.push(a) }
+    args.push("-c")
+    args.push(script)
+    return sys.exec(args, 10000)
+}
+
+let engines = [[], ["--tree"]]
+
+testing.test("circular import is reported, not a crash", lam{ in
+    for (e in engines) {
+        let r = run(e, "use \"./tests/fixtures/circular/a\"")
+        testing.expect(r.exitCode != -1, "crashed (%{e}): %{r.stderr}")
+        testing.expectContains(r.stderr, "Circular import: tests/fixtures/circular/a.praia -> tests/fixtures/circular/b.praia -> tests/fixtures/circular/a.praia", nil)
+    }
+})
+
+testing.test("grain importing itself is reported", lam{ in
+    for (e in engines) {
+        let r = run(e, "use \"./tests/fixtures/circular/self\"")
+        testing.expect(r.exitCode != -1, "crashed (%{e}): %{r.stderr}")
+        testing.expectContains(r.stderr, "Circular import: tests/fixtures/circular/self.praia -> tests/fixtures/circular/self.praia", nil)
+    }
+})
+
+testing.test("circular import error can be caught", lam{ in
+    let msg = nil
+    try { use "./fixtures/circular/a" } catch (e) { msg = str(e) }
+    testing.expectContains(msg, "Circular import", nil)
+})
+
+// Errors raised by a grain's own top-level code reach the importer.
+
+testing.test("thrown value from a grain can be caught unchanged", lam{ in
+    let caught = nil
+    try { use "./fixtures/grain_errors/thrower" } catch (e) { caught = e }
+    testing.expectEqual(caught, "boom", nil)
+
+    let code = nil
+    try { use "./fixtures/grain_errors/objthrow" } catch (e) { code = e.code }
+    testing.expectEqual(code, 42, nil)
+})
+
+testing.test("runtime error in a grain can be caught", lam{ in
+    let msg = nil
+    try { use "./fixtures/grain_errors/rterr" } catch (e) { msg = str(e) }
+    testing.expectContains(msg, "Operands of '+'", nil)
+})
+
+testing.test("grain errors propagate through intermediate grains", lam{ in
+    let caught = nil
+    try { use "./fixtures/grain_errors/middle" } catch (e) { caught = e }
+    testing.expectEqual(caught, "boom", nil)
+})
+
+testing.test("retrying a failed import reaches the same error", lam{ in
+    // A failed import doesn't count as imported, so the second attempt
+    // isn't reported as a duplicate.
+    func load() {
+        try { use "./fixtures/grain_errors/objthrow" } catch (e) { return e.code }
+    }
+    testing.expectEqual(load(), 42, nil)
+    testing.expectEqual(load(), 42, nil)
+})
+
+testing.test("a grain can catch a failing import itself", lam{ in
+    use "./fixtures/grain_errors/catcher"
+    testing.expectEqual(catcher.v, 7, nil)
+})
+
+testing.test("a failing defer doesn't replace the grain's error", lam{ in
+    let caught = nil
+    try { use "./fixtures/grain_errors/deferfail" } catch (e) { caught = e }
+    testing.expectEqual(caught, "boom", nil)
+})
+
+testing.test("a failing defer in a grain is still reported (VM)", lam{ in
+    // The tree-walker doesn't run defers at a grain's top level.
+    let r = run([], "try { use \"./tests/fixtures/grain_errors/deferfail\" } catch (e) { print(e) }")
+    testing.expectContains(r.stderr, "Error in deferred call: defer fail", nil)
+    testing.expectContains(r.stdout, "boom", nil)
+})
+
+// A grain's top-level defers run when its top level finishes, before
+// the importer continues.
+
+testing.test("grain defers run at export, newest first", lam{ in
+    use "./fixtures/grain_defers/exported"
+    testing.expectEqual(exported.log, ["body", "defer 2", "defer 1"], nil)
+})
+
+testing.test("grain defers run before the importer continues", lam{ in
+    for (e in engines) {
+        let r = run(e, "func f() { use \"./tests/fixtures/grain_defers/noexport\"\nprint(\"importer\") }\nf()")
+        testing.expectEqual(r.stdout, "grain body\ngrain defer\nimporter", "%{e}: %{r.stderr}")
+    }
+})
+
+testing.test("grain defers run when the grain throws", lam{ in
+    for (e in engines) {
+        let r = run(e, "try { use \"./tests/fixtures/grain_defers/throws\" } catch (err) { print(\"caught\", err) }")
+        testing.expectEqual(r.stdout, "grain body\ngrain defer\ncaught boom", "%{e}: %{r.stderr}")
+    }
+})
+
+testing.test("uncaught grain error stops the program", lam{ in
+    for (e in engines) {
+        let r = run(e, "use \"./tests/fixtures/grain_errors/thrower\"\nprint(\"after\")")
+        testing.expect(r.exitCode != 0 && r.exitCode != -1, "exit code (%{e}): %{r.exitCode}")
+        testing.expect(!r.stdout.contains("after"), "kept running after the error (%{e})")
+        testing.expectContains(r.stderr, "Uncaught error: boom", nil)
+    }
+})
+
+testing.test("uncaught grain runtime error reports its location in the grain", lam{ in
+    for (e in engines) {
+        let r = run(e, "use \"./tests/fixtures/grain_errors/rterr\"")
+        testing.expect(r.exitCode != 0 && r.exitCode != -1, "exit code (%{e}): %{r.exitCode}")
+        testing.expectContains(r.stderr, "[line 3:col 13] Runtime error: Operands of '+'", nil)
+    }
+})
+
+testing.done()

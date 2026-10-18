@@ -1,0 +1,3 @@
+// Imports a grain that throws, without catching it
+use "./thrower"
+export { }

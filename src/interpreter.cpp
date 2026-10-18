@@ -246,10 +246,19 @@ Value Interpreter::loadGrain(const std::string& importPath, int line) {
     if (importedInCurrentFile.count(resolved))
         throw RuntimeError("Grain '" + importPath + "' is already imported in this file", line);
     importedInCurrentFile.insert(resolved);
+    FailedImportGuard importGuard{importedInCurrentFile, resolved};
 
     // Return cached grain if already loaded by another file
     auto cached = grainCache.find(resolved);
-    if (cached != grainCache.end()) return cached->second;
+    if (cached != grainCache.end()) {
+        importGuard.loaded = true;
+        return cached->second;
+    }
+
+    // Only cached once it finishes, so a grain that's still loading
+    // further up the chain would otherwise be re-entered forever.
+    if (std::find(grainLoadStack_.begin(), grainLoadStack_.end(), resolved) != grainLoadStack_.end())
+        throw RuntimeError(circularImportMessage(grainLoadStack_, resolved), line);
 
     // Read source
     std::ifstream f(resolved);
@@ -284,30 +293,58 @@ Value Interpreter::loadGrain(const std::string& importPath, int line) {
     currentFile = resolved;
     importedInCurrentFile.clear();
     currentAstOwner_ = ast;
+    grainLoadStack_.push_back(resolved);
+
+    // The grain's top-level defers run when its top level finishes —
+    // normally, at `export`, or on an error — while its scope is still
+    // current. Errors in them are swallowed, as for function defers.
+    deferStacks_.push_back({});
+    bool defersRan = false;
+    auto runGrainDefers = [this, &defersRan]() {
+        if (defersRan) return;
+        defersRan = true;
+        auto defers = std::move(deferStacks_.back());
+        deferStacks_.pop_back();
+        for (int i = static_cast<int>(defers.size()) - 1; i >= 0; i--) {
+            try {
+                evaluate(defers[i]);
+            } catch (const ExitSignal&) {
+                throw;
+            } catch (...) {
+            }
+        }
+    };
 
     Value exports;
     try {
-        for (const auto& stmt : *ast)
-            execute(stmt.get());
-        // If no export statement was hit, export nothing
-        exports = Value(gcNew<PraiaMap>());
-    } catch (const ExportSignal& es) {
-        exports = Value(es.exports);
+        try {
+            for (const auto& stmt : *ast)
+                execute(stmt.get());
+            // If no export statement was hit, export nothing
+            exports = Value(gcNew<PraiaMap>());
+        } catch (const ExportSignal& es) {
+            exports = Value(es.exports);
+        }
+        runGrainDefers();
     } catch (...) {
+        runGrainDefers();
         env = prevEnv;
         currentFile = prevFile;
         importedInCurrentFile = prevImports;
         currentAstOwner_ = prevAstOwner;
+        grainLoadStack_.pop_back();
         throw;
     }
     env = prevEnv;
     currentFile = prevFile;
     importedInCurrentFile = prevImports;
     currentAstOwner_ = prevAstOwner;
+    grainLoadStack_.pop_back();
 
     // Keep the AST alive and cache the result
     grainAsts.push_back(std::move(ast));
     grainCache[resolved] = exports;
+    importGuard.loaded = true;
     return exports;
 }
 

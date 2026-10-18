@@ -1,0 +1,4 @@
+// A defer that fails while the grain's own error unwinds — see test_imports.praia
+func fail() { throw "defer fail" }
+defer fail()
+throw "boom"
