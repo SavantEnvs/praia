@@ -71,6 +71,7 @@ private:
     void compileReturnStmt(const ReturnStmt* stmt);
     void compileBreakStmt(const BreakStmt* stmt);
     void compileContinueStmt(const ContinueStmt* stmt);
+    void emitLoopExitPops(int scopeDepthAtLoop, int line, int column);
     void compileClassStmt(const ClassStmt* stmt);
     void compileEnumStmt(const EnumStmt* stmt);
     void compileThrowStmt(const ThrowStmt* stmt);

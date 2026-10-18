@@ -616,6 +616,22 @@ void Compiler::compileReturnStmt(const ReturnStmt* stmt) {
     emit(OpCode::OP_RETURN, stmt->line, stmt->column);
 }
 
+// Pops the loop-body locals that break/continue jump out of, without
+// removing them from the compiler's scope (the code after the jump is
+// still inside that scope). Like endScope, a local captured by a closure
+// gets OP_CLOSE_UPVALUE so the closure keeps its value instead of
+// pointing at a stack slot the next iteration reuses. A closure that
+// appears after the break/continue hasn't been compiled yet, so its
+// local isn't marked captured — but it can't have run yet in this
+// iteration either, so there's no open upvalue to close.
+void Compiler::emitLoopExitPops(int scopeDepthAtLoop, int line, int column) {
+    for (int i = static_cast<int>(current->locals.size()) - 1; i >= 0; i--) {
+        if (current->locals[i].depth <= scopeDepthAtLoop) break;
+        emit(current->locals[i].isCaptured ? OpCode::OP_CLOSE_UPVALUE : OpCode::OP_POP,
+             line, column);
+    }
+}
+
 void Compiler::compileBreakStmt(const BreakStmt* stmt) {
     if (current->loops.empty()) {
         error("'break' outside of loop", stmt->line);
@@ -626,11 +642,7 @@ void Compiler::compileBreakStmt(const BreakStmt* stmt) {
     for (int i = loop.tryDepthAtLoop; i < current->tryDepth; i++) {
         emit(OpCode::OP_TRY_END, stmt->line, stmt->column);
     }
-    // Pop locals in the loop scope
-    for (int i = static_cast<int>(current->locals.size()) - 1; i >= 0; i--) {
-        if (current->locals[i].depth <= loop.scopeDepthAtLoop) break;
-        emit(OpCode::OP_POP, stmt->line, stmt->column);
-    }
+    emitLoopExitPops(loop.scopeDepthAtLoop, stmt->line, stmt->column);
     loop.breakJumps.push_back(emitJump(OpCode::OP_JUMP, stmt->line, stmt->column));
 }
 
@@ -644,11 +656,7 @@ void Compiler::compileContinueStmt(const ContinueStmt* stmt) {
     for (int i = loop.tryDepthAtLoop; i < current->tryDepth; i++) {
         emit(OpCode::OP_TRY_END, stmt->line, stmt->column);
     }
-    // Pop locals inside the loop body
-    for (int i = static_cast<int>(current->locals.size()) - 1; i >= 0; i--) {
-        if (current->locals[i].depth <= loop.scopeDepthAtLoop) break;
-        emit(OpCode::OP_POP, stmt->line, stmt->column);
-    }
+    emitLoopExitPops(loop.scopeDepthAtLoop, stmt->line, stmt->column);
     // Jump forward to the increment section (will be patched later)
     loop.continueJumps.push_back(emitJump(OpCode::OP_JUMP, stmt->line, stmt->column));
 }

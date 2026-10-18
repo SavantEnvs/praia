@@ -60,6 +60,83 @@ testing.test("continue", lam{ in
     testing.expectEqual(evens[4], 8, nil)
 })
 
+// A closure created in a loop body must keep the value it captured
+// when break/continue leaves the body early, not read whatever the
+// next iteration puts in the same stack slot.
+func callAll(fs) { return map(fs, lam{ f in f() }) }
+
+testing.test("break keeps captured locals", lam{ in
+    let fs = []
+    for (i in 0 .. 5) {
+        let y = i * 2
+        fs.push(lam{ in y })
+        if (i == 2) { break }
+    }
+    testing.expectEqual(callAll(fs), [0, 2, 4], nil)
+})
+
+testing.test("continue keeps captured locals", lam{ in
+    let fs = []
+    let i = 0
+    while (i < 4) {
+        i = i + 1
+        let v = i * 100
+        fs.push(lam{ in v })
+        if (i % 2 == 1) { continue }
+    }
+    testing.expectEqual(callAll(fs), [100, 200, 300, 400], nil)
+})
+
+testing.test("break in for-in keeps captured loop variable", lam{ in
+    let fs = []
+    for (x in [1, 2, 3]) {
+        fs.push(lam{ in x })
+        if (x == 2) { break }
+    }
+    testing.expectEqual(callAll(fs), [1, 2], nil)
+})
+
+testing.test("break/continue in match arms keep captured locals", lam{ in
+    let fs = []
+    for (i in 0 .. 5) {
+        let y = i
+        fs.push(lam{ in y })
+        match (i) {
+            2 {
+                let z = i * 10
+                fs.push(lam{ in z })
+                break
+            }
+            _ {}
+        }
+    }
+    testing.expectEqual(callAll(fs), [0, 1, 2, 20], nil)
+
+    let gs = []
+    for (i in 0 .. 4) {
+        let y = i * 3
+        gs.push(lam{ in y })
+        match (i % 2) {
+            0 { continue }
+            _ {}
+        }
+    }
+    testing.expectEqual(callAll(gs), [0, 3, 6, 9], nil)
+})
+
+testing.test("closure state survives break", lam{ in
+    let fs = []
+    for (i in 0 .. 3) {
+        let n = 0
+        fs.push(lam{ in
+            n = n + 1
+            return n
+        })
+        if (i == 1) { break }
+    }
+    testing.expectEqual([fs[0](), fs[0](), fs[1]()], [1, 2, 1], nil)
+})
+
 testing.test("truthiness", lam{ in
     // Only nil and false are falsy — everything else is truthy
     testing.expect(1, nil)
