@@ -339,25 +339,41 @@ void GcHeap::forEachChild(void* obj, GcNodeKind kind, F& f) {
             } else if (auto* bm = dynamic_cast<VMBoundMethod*>(c)) {
                 visitValue(bm->receiver, true, f);
                 visitPtr(bm->definingClass, GcNodeKind::Class, true, f);
+                visitPtr(bm->taskOwnership, GcNodeKind::TaskOwnership, true, f);
             } else if (auto* vmcc = dynamic_cast<VMClosureCallable*>(c)) {
-                // Closed upvalues and constant pools are owned by the VM
-                // (allUpvalues / the compiled function), not by this
-                // callable: follow them for marking, but they aren't
-                // references the callable holds.
                 if (vmcc->closure) {
-                    for (auto* uv : vmcc->closure->upvalues) {
-                        if (uv && uv->location == &uv->closed)
-                            visitValue(uv->closed, false, f);
-                    }
+                    // Upvalues are nodes of their own: several closures
+                    // can share one, and its single owner (the VM's
+                    // allUpvalues, or a task's ownership bag) holds the
+                    // only reference to it. This edge isn't that one.
+                    for (auto* uv : vmcc->closure->upvalues)
+                        if (uv) f(static_cast<void*>(uv), GcNodeKind::Upvalue, 1, false);
+                    // Constant pools belong to the compiled function.
                     for (auto& constant : vmcc->closure->function->chunk.constants)
                         visitValue(constant, false, f);
                 }
+                visitPtr(vmcc->taskOwnership, GcNodeKind::TaskOwnership, true, f);
             }
             // NativeFunction: captures live inside std::function and
             // can't be enumerated. Anything it captures therefore shows
             // up as externally held and is kept.
             break;
         }
+        case GcNodeKind::Upvalue: {
+            // Counted as having one reference — its owner. An upvalue the
+            // VM owns stays a root; one owned by a task bag cancels out
+            // through the bag's edge below. Open upvalues point into the
+            // VM stack, which the VM's root marker covers.
+            auto* uv = static_cast<ObjUpvalue*>(obj);
+            if (uv->location == &uv->closed) visitValue(uv->closed, true, f);
+            break;
+        }
+        case GcNodeKind::TaskOwnership:
+            // Closures returned from an async task keep their upvalues
+            // here (unique_ptr) instead of in a VM's allUpvalues.
+            for (auto& uv : static_cast<TaskOwnership*>(obj)->upvalues)
+                if (uv) f(static_cast<void*>(uv.get()), GcNodeKind::Upvalue, 1, true);
+            break;
     }
 }
 

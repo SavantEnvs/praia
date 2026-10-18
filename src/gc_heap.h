@@ -10,11 +10,13 @@ class Environment; // forward declaration
 enum class GcType { Array, Tagged, Map, Set, Instance, Class, Generator, Environment, External };
 
 // Node kinds in the object graph the collector walks. Superset of
-// GcType: Callables (functions, lambdas, bound methods) aren't tracked
-// themselves but sit on paths between tracked objects, so the
-// external-reference scan has to see through them.
+// GcType: Callables (functions, lambdas, bound methods), VM upvalues and
+// async-task ownership bags aren't tracked themselves but sit on paths
+// between tracked objects, so the external-reference scan has to see
+// through them.
 enum class GcNodeKind : uint8_t {
-    Array, Tagged, Map, Set, Instance, Class, Generator, Environment, External, Callable
+    Array, Tagged, Map, Set, Instance, Class, Generator, Environment, External, Callable,
+    Upvalue, TaskOwnership
 };
 
 class GcHeap {

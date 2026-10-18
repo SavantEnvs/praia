@@ -74,4 +74,16 @@ testing.test("generator locals survive GC between yields", lam{ in
     testing.expectEqual(it.next().value, [1, 2, 3], nil)
 })
 
+testing.test("closure returned from async task keeps its captures", lam{ in
+    // Its upvalues live in the task's ownership bag, not the VM's.
+    func mk(arr) { return lam{ in arr } }
+    let c = await async mk([1, [2, 3]])
+    c().push(c)   // cycle through the task-owned upvalue
+    churn()
+    let arr = c()
+    testing.expectEqual(arr[0], 1, nil)
+    testing.expectEqual(arr[1], [2, 3], nil)
+    testing.expectEqual(len(arr), 3, nil)
+})
+
 testing.done()

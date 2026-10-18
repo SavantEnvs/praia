@@ -622,9 +622,26 @@ void Compiler::compileReturnStmt(const ReturnStmt* stmt) {
     } else {
         emit(OpCode::OP_NIL, stmt->line, stmt->column);
     }
-    // Leave every try in this function, running finally blocks on the way
+    if (current->finallyStack.empty()) {
+        // Leave any try handlers in this function and return
+        emitFinallyUnwind(0, 0, stmt->line, stmt->column);
+        emit(OpCode::OP_RETURN, stmt->line, stmt->column);
+        return;
+    }
+    // Finally bodies run while the return value sits on the stack. Track
+    // it as a local so their own locals get the right slots, and so a
+    // break/continue inside one (which cancels the return) pops it.
+    beginScope();
+    addLocal("__ret__");
+    int retSlot = static_cast<int>(current->locals.size()) - 1;
     emitFinallyUnwind(0, 0, stmt->line, stmt->column);
+    emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
+    emitU16(static_cast<uint16_t>(retSlot), stmt->line, stmt->column);
     emit(OpCode::OP_RETURN, stmt->line, stmt->column);
+    // OP_RETURN discards the frame's stack, so drop the local from the
+    // compiler's view without emitting a pop.
+    current->locals.pop_back();
+    current->scopeDepth--;
 }
 
 // Pops the loop-body locals that break/continue jump out of, without

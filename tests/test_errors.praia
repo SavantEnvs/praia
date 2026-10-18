@@ -468,6 +468,34 @@ testing.test("break inside finally during break", lam{ in
     testing.expectEqual(log, ["in", "out"], nil)
 })
 
+testing.test("local declared in finally on return", lam{ in
+    let seen = []
+    func test() {
+        let a = 1
+        try {
+            return a
+        } catch (e) {
+        } finally {
+            let z = 5
+            push(seen, z)
+        }
+    }
+    testing.expectEqual(test(), 1, nil)
+    testing.expectEqual(seen, [5], nil)
+})
+
+testing.test("break in finally cancels return; locals after the loop", lam{ in
+    func test() {
+        let before = "b"
+        for (i in 0..3) {
+            try { return "r" } catch (e) {} finally { break }
+        }
+        let after = "after"
+        return before + after
+    }
+    testing.expectEqual(test(), "bafter", nil)
+})
+
 testing.test("locals declared in finally on break", lam{ in
     let log = []
     for (i in 0..3) {
