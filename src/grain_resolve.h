@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -206,3 +207,14 @@ inline std::string circularImportMessage(const std::vector<std::string>& loading
     }
     return msg + display(resolved);
 }
+
+// Removes a grain from importedInCurrentFile if loading it fails, so a
+// retry reaches the same error instead of "already imported". Holds a
+// reference to the member, which is swapped out while the grain runs
+// and restored before this fires.
+struct FailedImportGuard {
+    std::set<std::string>& imported;
+    const std::string& resolved;
+    bool loaded = false;
+    ~FailedImportGuard() { if (!loaded) imported.erase(resolved); }
+};

@@ -903,6 +903,7 @@ Value VM::loadGrain(const std::string& importPath, int line) {
     if (importedInCurrentFile.count(resolved))
         throw RuntimeError("Grain '" + importPath + "' is already imported in this file", line);
     importedInCurrentFile.insert(resolved);
+    FailedImportGuard importGuard{importedInCurrentFile, resolved};
 
     // Cache lookup goes through the root VM so two sibling grains
     // importing the same dependency share one execution. Without this,
@@ -911,7 +912,10 @@ Value VM::loadGrain(const std::string& importPath, int line) {
     // top-level `print` firing twice).
     auto& cache = rootVm().grainCache;
     auto cached = cache.find(resolved);
-    if (cached != cache.end()) return cached->second;
+    if (cached != cache.end()) {
+        importGuard.loaded = true;
+        return cached->second;
+    }
 
     // Only cached once it finishes, so a grain that's still loading
     // further up the chain would otherwise be re-entered forever.
@@ -1038,6 +1042,7 @@ Value VM::loadGrain(const std::string& importPath, int line) {
     }
 
     rootVm().grainCache[resolved] = exports;
+    importGuard.loaded = true;
     return exports;
 }
 

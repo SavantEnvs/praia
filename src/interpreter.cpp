@@ -246,10 +246,14 @@ Value Interpreter::loadGrain(const std::string& importPath, int line) {
     if (importedInCurrentFile.count(resolved))
         throw RuntimeError("Grain '" + importPath + "' is already imported in this file", line);
     importedInCurrentFile.insert(resolved);
+    FailedImportGuard importGuard{importedInCurrentFile, resolved};
 
     // Return cached grain if already loaded by another file
     auto cached = grainCache.find(resolved);
-    if (cached != grainCache.end()) return cached->second;
+    if (cached != grainCache.end()) {
+        importGuard.loaded = true;
+        return cached->second;
+    }
 
     // Only cached once it finishes, so a grain that's still loading
     // further up the chain would otherwise be re-entered forever.
@@ -340,6 +344,7 @@ Value Interpreter::loadGrain(const std::string& importPath, int line) {
     // Keep the AST alive and cache the result
     grainAsts.push_back(std::move(ast));
     grainCache[resolved] = exports;
+    importGuard.loaded = true;
     return exports;
 }
 

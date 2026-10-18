@@ -59,6 +59,16 @@ testing.test("grain errors propagate through intermediate grains", lam{ in
     testing.expectEqual(caught, "boom", nil)
 })
 
+testing.test("retrying a failed import reaches the same error", lam{ in
+    // A failed import doesn't count as imported, so the second attempt
+    // isn't reported as a duplicate.
+    func load() {
+        try { use "./fixtures/grain_errors/objthrow" } catch (e) { return e.code }
+    }
+    testing.expectEqual(load(), 42, nil)
+    testing.expectEqual(load(), 42, nil)
+})
+
 testing.test("a grain can catch a failing import itself", lam{ in
     use "./fixtures/grain_errors/catcher"
     testing.expectEqual(catcher.v, 7, nil)
