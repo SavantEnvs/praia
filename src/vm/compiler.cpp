@@ -354,8 +354,8 @@ void Compiler::compileWhileStmt(const WhileStmt* stmt) {
 
 void Compiler::compileForStmt(const ForStmt* stmt) {
     // Compiled as:
-    // let __i__ = <start>
-    // let __end__ = <end>
+    // let __i__ = __rangeBound(<start>)    // integer, truncated toward zero
+    // let __end__ = __rangeBound(<end>)
     // while (__i__ < __end__) {
     //     let varName = __i__     // fresh per iteration, so closures
     //     <body>                  // capture that iteration's value and
@@ -363,19 +363,32 @@ void Compiler::compileForStmt(const ForStmt* stmt) {
     // }
     beginScope();
 
-    // Evaluate bounds
+    // Evaluate both bounds, then validate and truncate each in place
+    // (start first) — the same order the tree-walker uses
     compileExpr(stmt->start.get());
     addLocal("__i__");  // hidden counter
+    int iSlot = resolveLocal(current, "__i__");
 
     compileExpr(stmt->end.get());
     addLocal("__end__");  // hidden end bound
+    int endSlot = resolveLocal(current, "__end__");
+
+    for (int slot : {iSlot, endSlot}) {
+        emit(OpCode::OP_GET_GLOBAL, stmt->line, stmt->column);
+        emitU16(identifierConstant("__rangeBound"), stmt->line, stmt->column);
+        emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
+        emitU16(static_cast<uint16_t>(slot), stmt->line, stmt->column);
+        emit(OpCode::OP_CALL, stmt->line, stmt->column);
+        emit(1, stmt->line, stmt->column);
+        emit(OpCode::OP_SET_LOCAL, stmt->line, stmt->column);
+        emitU16(static_cast<uint16_t>(slot), stmt->line, stmt->column);
+        emit(OpCode::OP_POP, stmt->line, stmt->column);
+    }
 
     int loopStart = currentChunk().size();
     current->loops.push_back({loopStart, loopStart, {}, {}, current->scopeDepth, current->tryDepth, current->finallyStack.size()});
 
     // Condition: __i__ < __end__
-    int iSlot = resolveLocal(current, "__i__");
-    int endSlot = resolveLocal(current, "__end__");
     emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);
     emitU16(static_cast<uint16_t>(iSlot), stmt->line, stmt->column);
     emit(OpCode::OP_GET_LOCAL, stmt->line, stmt->column);

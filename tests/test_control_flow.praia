@@ -136,6 +136,55 @@ testing.test("range loop gives each iteration its own variable", lam{ in
     testing.expectEqual(callAll(pairs), [[0, 0], [0, 1], [1, 0], [1, 1]], nil)
 })
 
+testing.test("range bounds are truncated toward zero", lam{ in
+    let a = []
+    for (i in 0 .. 2.5) { a.push(i) }
+    testing.expectEqual(a, [0, 1], nil)
+
+    let b = []
+    for (i in 0.5 .. 3) { b.push(i) }
+    testing.expectEqual(b, [0, 1, 2], nil)
+
+    let c = []
+    for (i in -2.7 .. 1.9) { c.push(i) }
+    testing.expectEqual(c, [-2, -1, 0], nil)
+})
+
+testing.test("large integer range bounds keep full precision", lam{ in
+    let a = []
+    for (i in 9007199254740993 .. 9007199254740995) { a.push(i) }
+    testing.expectEqual(a, [9007199254740993, 9007199254740994], nil)
+})
+
+testing.test("invalid range bounds throw", lam{ in
+    let msg = nil
+    try { for (i in 0 .. "x") {} } catch (e) { msg = str(e) }
+    testing.expectContains(msg, "Range bounds must be numbers", nil)
+
+    let inf = 1e308 * 10
+    msg = nil
+    try { for (i in 0 .. inf) {} } catch (e) { msg = str(e) }
+    testing.expectContains(msg, "finite", nil)
+
+    msg = nil
+    try { for (i in 0 .. 1e30) {} } catch (e) { msg = str(e) }
+    testing.expectContains(msg, "64-bit integer range", nil)
+})
+
+testing.test("both range bounds are evaluated before either is checked", lam{ in
+    let log = []
+    func lo() {
+        log.push("lo")
+        return "bad"
+    }
+    func hi() {
+        log.push("hi")
+        return 3
+    }
+    try { for (i in lo() .. hi()) {} } catch (e) {}
+    testing.expectEqual(log, ["lo", "hi"], nil)
+})
+
 testing.test("assigning the range variable doesn't change iteration", lam{ in
     let seen = []
     for (i in 0 .. 5) {

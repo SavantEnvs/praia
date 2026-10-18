@@ -606,11 +606,8 @@ void Interpreter::execute(const Stmt* stmt) {
         auto* s = static_cast<const ForStmt*>(stmt);
         Value startVal = evaluate(s->start.get());
         Value endVal   = evaluate(s->end.get());
-        if (!startVal.isNumber() || !endVal.isNumber())
-            throw RuntimeError("Range bounds must be numbers", s->line, s->column);
-
-        int64_t from = static_cast<int64_t>(startVal.asNumber());
-        int64_t to   = static_cast<int64_t>(endVal.asNumber());
+        int64_t from = rangeBoundToInt(startVal, s->line, s->column);
+        int64_t to   = rangeBoundToInt(endVal, s->line, s->column);
         auto* bodyBlock = static_cast<const BlockStmt*>(s->body.get());
 
         try {

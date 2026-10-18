@@ -449,6 +449,14 @@ void vmRegisterNatives(VM& vm) {
             return Value(result);
         }));
 
+    // Range-loop bound: validates and truncates to an integer (see
+    // rangeBoundToInt). Called once per bound when a `for (i in a..b)`
+    // loop starts.
+    vm.defineNative("__rangeBound", makeNat("__rangeBound", 1,
+        [](const std::vector<Value>& args) -> Value {
+            return Value(rangeBoundToInt(args[0]));
+        }));
+
     vm.defineNative("__arraySlice", makeNat("__arraySlice", 2,
         [](const std::vector<Value>& args) -> Value {
             if (!args[0].isArray() || !args[1].isNumber()) return Value();

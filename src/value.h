@@ -130,6 +130,20 @@ struct Value {
 };
 
 // Concrete types — defined after Value so they can hold Values
+// Bound of a range loop (`for (i in a..b)`): a number, truncated toward
+// zero to an integer. Shared by both engines so they agree.
+inline int64_t rangeBoundToInt(const Value& v, int line = 0, int column = 0) {
+    if (v.isInt()) return v.asInt();
+    if (!v.isNumber()) throw RuntimeError("Range bounds must be numbers", line, column);
+    double d = std::trunc(v.asNumber());
+    // Casting NaN, infinity or anything outside int64 is UB
+    if (!std::isfinite(d))
+        throw RuntimeError("Range bounds must be finite numbers", line, column);
+    if (!(d >= -9223372036854775808.0 && d < 9223372036854775808.0))
+        throw RuntimeError("Range bound is outside the 64-bit integer range", line, column);
+    return static_cast<int64_t>(d);
+}
+
 struct PraiaArray {
     std::vector<Value> elements;
 };
