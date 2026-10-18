@@ -291,15 +291,39 @@ Value Interpreter::loadGrain(const std::string& importPath, int line) {
     currentAstOwner_ = ast;
     grainLoadStack_.push_back(resolved);
 
+    // The grain's top-level defers run when its top level finishes —
+    // normally, at `export`, or on an error — while its scope is still
+    // current. Errors in them are swallowed, as for function defers.
+    deferStacks_.push_back({});
+    bool defersRan = false;
+    auto runGrainDefers = [this, &defersRan]() {
+        if (defersRan) return;
+        defersRan = true;
+        auto defers = std::move(deferStacks_.back());
+        deferStacks_.pop_back();
+        for (int i = static_cast<int>(defers.size()) - 1; i >= 0; i--) {
+            try {
+                evaluate(defers[i]);
+            } catch (const ExitSignal&) {
+                throw;
+            } catch (...) {
+            }
+        }
+    };
+
     Value exports;
     try {
-        for (const auto& stmt : *ast)
-            execute(stmt.get());
-        // If no export statement was hit, export nothing
-        exports = Value(gcNew<PraiaMap>());
-    } catch (const ExportSignal& es) {
-        exports = Value(es.exports);
+        try {
+            for (const auto& stmt : *ast)
+                execute(stmt.get());
+            // If no export statement was hit, export nothing
+            exports = Value(gcNew<PraiaMap>());
+        } catch (const ExportSignal& es) {
+            exports = Value(es.exports);
+        }
+        runGrainDefers();
     } catch (...) {
+        runGrainDefers();
         env = prevEnv;
         currentFile = prevFile;
         importedInCurrentFile = prevImports;

@@ -754,6 +754,18 @@ void VM::unwindFramesAndRunDefers(int targetFrameCount) {
 void VM::runDefers(int frameIdx) {
     auto defers = std::move(deferStack[frameIdx]);
     deferStack[frameIdx].clear();
+    if (defers.empty()) return;
+    // A failing defer reports itself below; it must not replace the
+    // record of an uncaught error being unwound right now, which a
+    // failed grain hands to its importer.
+    struct SavedError {
+        std::string message;
+        Value thrown;
+        bool wasThrow;
+        int line, column;
+        std::string trace;
+    } saved{lastError_, lastThrown_, lastErrorWasThrow_,
+            lastErrorLine_, lastErrorColumn_, lastErrorTrace_};
     // Save VM state, run defers on the same VM (re-entrant but safe because
     // result is popped before we get here), then let OP_RETURN restore.
     // Errors in one defer must not stop the rest from running, but we surface
@@ -791,11 +803,19 @@ void VM::runDefers(int frameIdx) {
         // Restore stack — deferred function's return might have changed stackTop
         stackTop = savedTop;
         frameCount = savedFrameCount;
-        if (errored && !suppressErrors_) {
+        // A grain VM suppresses its uncaught error (the importer raises
+        // it) but nobody else reports a failed defer, so it prints here.
+        if (errored && (!suppressErrors_ || parentVm_)) {
             std::cerr << "Error in deferred call: "
                       << (errMsg.empty() ? "(no message)" : errMsg) << std::endl;
         }
     }
+    lastError_ = std::move(saved.message);
+    lastThrown_ = std::move(saved.thrown);
+    lastErrorWasThrow_ = saved.wasThrow;
+    lastErrorLine_ = saved.line;
+    lastErrorColumn_ = saved.column;
+    lastErrorTrace_ = std::move(saved.trace);
 }
 
 void VM::runtimeError(const std::string& msg, int line, int column) {
@@ -2505,6 +2525,9 @@ VM::Result VM::execute(int baseFrameCount_) {
             // For a grain, this is the return value. Just return from execution.
             {
                 Value result = pop();
+                // `export` ends the grain's top level, so its defers run
+                // now, as OP_RETURN does for a function.
+                runDefers(frameCount - 1);
                 int returnBase = FRAME.baseSlot;
                 closeUpvalues(&stack[returnBase]);
                 frameCount--;

@@ -64,6 +64,41 @@ testing.test("a grain can catch a failing import itself", lam{ in
     testing.expectEqual(catcher.v, 7, nil)
 })
 
+testing.test("a failing defer doesn't replace the grain's error", lam{ in
+    let caught = nil
+    try { use "./fixtures/grain_errors/deferfail" } catch (e) { caught = e }
+    testing.expectEqual(caught, "boom", nil)
+})
+
+testing.test("a failing defer in a grain is still reported (VM)", lam{ in
+    // The tree-walker doesn't run defers at a grain's top level.
+    let r = run([], "try { use \"./tests/fixtures/grain_errors/deferfail\" } catch (e) { print(e) }")
+    testing.expectContains(r.stderr, "Error in deferred call: defer fail", nil)
+    testing.expectContains(r.stdout, "boom", nil)
+})
+
+// A grain's top-level defers run when its top level finishes, before
+// the importer continues.
+
+testing.test("grain defers run at export, newest first", lam{ in
+    use "./fixtures/grain_defers/exported"
+    testing.expectEqual(exported.log, ["body", "defer 2", "defer 1"], nil)
+})
+
+testing.test("grain defers run before the importer continues", lam{ in
+    for (e in engines) {
+        let r = run(e, "func f() { use \"./tests/fixtures/grain_defers/noexport\"\nprint(\"importer\") }\nf()")
+        testing.expectEqual(r.stdout, "grain body\ngrain defer\nimporter", "%{e}: %{r.stderr}")
+    }
+})
+
+testing.test("grain defers run when the grain throws", lam{ in
+    for (e in engines) {
+        let r = run(e, "try { use \"./tests/fixtures/grain_defers/throws\" } catch (err) { print(\"caught\", err) }")
+        testing.expectEqual(r.stdout, "grain body\ngrain defer\ncaught boom", "%{e}: %{r.stderr}")
+    }
+})
+
 testing.test("uncaught grain error stops the program", lam{ in
     for (e in engines) {
         let r = run(e, "use \"./tests/fixtures/grain_errors/thrower\"\nprint(\"after\")")
