@@ -1,0 +1,9 @@
+project: savantenvs/praia
+target: fuzz_yaml
+testsuite:
+  - https://$MAYHEM_DOMAIN/$MAYHEM_PROJECT/$MAYHEM_TARGET/testsuite.tar
+  - file://mayhem/fuzz_yaml/testsuite
+cmds:
+  - cmd: /mayhem/fuzz_yaml
+    libfuzzer: true
+    timeout: 10
